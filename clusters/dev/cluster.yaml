@@ -1,0 +1,26 @@
+apiVersion: eksctl.io/v1alpha5
+kind: ClusterConfig
+
+metadata:
+  name: my-vote-cluster
+  region: us-east-1
+  tags:
+    Project: my-vote
+    Environment: dev
+
+availabilityZones: ["us-east-1a", "us-east-1b"]
+
+nodeGroups:
+  - name: ng-default
+    instanceType: t3.medium
+    desiredCapacity: 2
+    minSize: 1
+    maxSize: 3
+    volumeSize: 20
+    iam:
+      withAddonPolicies:
+        autoScaler: true
+        cloudWatch: true
+    tags:
+      NodeGroup: default
+      Project: my-vote
