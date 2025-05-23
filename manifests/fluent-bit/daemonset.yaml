@@ -17,7 +17,7 @@ spec:
       serviceAccountName: fluent-bit
       containers:
       - name: fluent-bit
-        image: fluent/fluent-bit:2.2.2
+        image: fluent/fluent-bit:1.8.12
         volumeMounts:
         - name: varlog
           mountPath: /var/log
