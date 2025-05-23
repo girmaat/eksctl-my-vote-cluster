@@ -29,4 +29,3 @@ data:
         Format json_lines
         json_date_key time
         json_date_format iso8601
-        Log_Key log
