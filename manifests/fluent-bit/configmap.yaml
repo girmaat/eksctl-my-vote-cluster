@@ -13,7 +13,7 @@ data:
     [INPUT]
         Name              tail
         Path              /var/log/containers/*.log
-        Parser            docker
+        Parser            cri
         Tag               kube.*
 
     [FILTER]
