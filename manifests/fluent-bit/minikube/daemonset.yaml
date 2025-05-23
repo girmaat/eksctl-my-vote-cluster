@@ -15,7 +15,7 @@ spec:
       serviceAccountName: fluent-bit
       containers:
         - name: fluent-bit
-          image: fluent/fluent-bit:1.8.12     # ✅ Same image as elasticsearch version
+          image: fluent/fluent-bit:1.8.12
           volumeMounts:
             - name: varlog
               mountPath: /var/log
@@ -24,8 +24,7 @@ spec:
             - name: config
               mountPath: /fluent-bit/etc/
             - name: parsers
-              mountPath: /fluent-bit/etc/parsers.conf   # ✅ Use shared parser
-              subPath: parsers.conf
+              mountPath: /fluent-bit/parsers/   # ✅ Mount entire directory, not subPath
           resources:
             limits:
               memory: 100Mi
