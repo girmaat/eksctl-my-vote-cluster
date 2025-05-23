@@ -21,6 +21,8 @@ spec:
         volumeMounts:
         - name: varlog
           mountPath: /var/log
+        - name: containers
+          mountPath: /var/log/containers
         - name: config
           mountPath: /fluent-bit/etc/
         resources:
