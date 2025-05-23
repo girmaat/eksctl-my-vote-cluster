@@ -2,56 +2,68 @@
 
 set -e
 
-echo "🔁 Applying all Kubernetes YAML manifests under ./manifests..."
+echo "==================================================================="
+echo "🧩 STEP 1: Selectively apply environment-specific folders (e.g., EKS)"
+echo "==================================================================="
 
-# === Step 1: Confirm applying environment-sensitive folders ===
-
+# Prompt before applying EKS metrics
 if [ -d "manifests/metrics/eks" ]; then
-  read -p "⚠️  Apply EKS metrics manifests? (manifests/metrics/eks) [y/N]: " confirm_eks
+  read -p "❓ Do you want to apply EKS-specific metrics configs (manifests/metrics/eks)? [y/N]: " confirm_eks
   if [[ "$confirm_eks" =~ ^[Yy]$ ]]; then
-    echo "✅ Applying EKS metrics..."
+    echo "✅ Applying EKS metrics manifests..."
     kubectl apply -f manifests/metrics/eks/ --recursive
   else
-    echo "⏩ Skipping EKS metrics"
+    echo "⏭️  Skipping EKS metrics manifests."
   fi
 fi
 
-# === Step 2: Ensure namespaces exist ===
+echo ""
+echo "==================================================================="
+echo "🔧 STEP 2: Ensure required Kubernetes namespaces exist"
+echo "==================================================================="
 
-echo "🔧 Ensuring required namespaces exist..."
-kubectl get namespace logging >/dev/null 2>&1 || kubectl create namespace logging
-kubectl get namespace kube-system >/dev/null 2>&1 || echo "ℹ️ kube-system already exists (system namespace)"
+kubectl get namespace logging >/dev/null 2>&1 || { echo "📁 Creating namespace: logging"; kubectl create namespace logging; }
+kubectl get namespace kube-system >/dev/null 2>&1 || echo "ℹ️ Namespace 'kube-system' is built-in and already exists."
 
-# === Step 3: Apply all general manifests ===
+echo ""
+echo "==================================================================="
+echo "📦 STEP 3: Applying all manifests under ./manifests recursively"
+echo "==================================================================="
 
-echo "📦 Applying all other manifests recursively..."
 kubectl apply -f manifests/ --recursive
 
-# === Step 4: Automatically restart deployments if images changed ===
-
-echo -e "\n🔄 Restarting deployments to ensure updated images are picked up..."
+echo ""
+echo "==================================================================="
+echo "🔄 STEP 4: Restarting critical Deployments to pick up new image versions"
+echo "==================================================================="
 
 declare -a DEPLOYMENTS=("vote" "result" "worker" "kibana")
 
 for deploy in "${DEPLOYMENTS[@]}"; do
-  echo "🔁 Restarting deployment/$deploy in default/logging namespace..."
-  kubectl rollout restart deployment "$deploy" || echo "⚠️  Skipped: $deploy not found"
+  echo "🔁 Attempting to restart deployment '$deploy'..."
+  kubectl rollout restart deployment "$deploy" 2>/dev/null || echo "⚠️  Deployment '$deploy' not found or not in current namespace — skipping."
 done
 
-# === Step 5: Summary output ===
+echo ""
+echo "==================================================================="
+echo "📊 STEP 5: Status Summary — Log Stack Components"
+echo "==================================================================="
 
-echo -e "\n✅ Current state of major components:\n"
-
-echo "📥 Elasticsearch:"
+echo "📥 Elasticsearch Pods (namespace: logging):"
 kubectl get pods -n logging -l app=elasticsearch
 
-echo -e "\n📊 Kibana:"
+echo ""
+echo "📊 Kibana Pod (namespace: logging):"
 kubectl get pods -n logging -l app=kibana
 
-echo -e "\n📤 Fluent Bit:"
+echo ""
+echo "📤 Fluent Bit Pods (namespace: kube-system):"
 kubectl get pods -n kube-system -l name=fluent-bit
 
-echo -e "\n🌐 Services in 'logging' namespace:"
+echo ""
+echo "🌐 Services in 'logging' namespace:"
 kubectl get svc -n logging
 
-echo -e "\n🎉 Done. Your stack has been applied and restarted where needed."
+echo ""
+echo "🎉 All done! Your full EFK stack (and optional metrics) has been applied successfully."
+echo "💡 Use 'kubectl logs' or Kibana UI to inspect logs. Run validate-efk.sh to verify health."
