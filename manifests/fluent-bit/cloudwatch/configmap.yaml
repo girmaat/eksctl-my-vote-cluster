@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluent-bit-config
+  namespace: kube-system
+data:
+  fluent-bit.conf: |
+    [SERVICE]
+        Flush        1               # How frequently logs are flushed (in seconds)
+        Daemon       Off             # Run in foreground
+        Log_Level    info            # Log level: can change to debug for more info
+        Parsers_File parsers.conf    # Load the external parser file (mounted from shared ConfigMap)
+
+    [INPUT]
+        Name              tail
+        Path              /var/log/containers/*.log  # Standard Kubernetes log path
+        Parser            cri
+        Tag               kube.*                     # All logs tagged for filtering below
+
+    [FILTER]
+        Name                kubernetes
+        Match               kube.*
+        Merge_Log           On         # Merge structured log field into main record
+        Keep_Log            Off        # Remove original raw log key
+
+    [OUTPUT]
+        Name                cloudwatch_logs
+        Match               *
+        region              us-east-1                     # 🔁 Change to your AWS region
+        log_group_name      /eks/fluent-bit/logs          # 🔁 Change to your log group
+        log_stream_prefix   from-fluent-bit-              # Logs will have this prefix
+        auto_create_group   true                          # Will create log group if missing
