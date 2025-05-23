@@ -45,9 +45,9 @@ for deploy in "${DEPLOYMENTS[@]}"; do
 done
 
 echo ""
-echo "==================================================================="
+echo "=================================================================="
 echo "📊 STEP 5: Status Summary — Log Stack Components"
-echo "==================================================================="
+echo "=================================================================="
 
 echo "📥 Elasticsearch Pods (namespace: logging):"
 kubectl get pods -n logging -l app=elasticsearch
