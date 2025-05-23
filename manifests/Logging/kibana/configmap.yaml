@@ -1,0 +1,11 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kibana-config
+  namespace: logging
+data:
+  kibana.yml: |
+    server.name: kibana       # Sets a friendly name for the UI instance (shown in logs/UI)
+    server.host: "0.0.0.0"    # Allows access from outside the container. Binds to all IPs (needed inside containers for external access)
+    elasticsearch.hosts: [ "http://elasticsearch.logging.svc.cluster.local:9200" ]       # Points Kibana to your Elasticsearch pod via internal DNS
+    monitoring.ui.container.elasticsearch.enabled: true  # Enables Kibana’s own status and monitoring if needed
