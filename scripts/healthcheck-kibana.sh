@@ -22,5 +22,5 @@ if [[ "$STATUS" == "green" ]]; then
 elif [[ "$STATUS" == "yellow" ]]; then
   echo "⚠️  Kibana is up but not fully healthy (status: $STATUS)"
 else
-  echo "❌ Kibana returned unhealthy status: $STATUS"
+  echo "❌ Kibana returned unhealthy status is : $STATUS"
 fi
