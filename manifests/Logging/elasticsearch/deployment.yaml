@@ -23,10 +23,14 @@ spec:
             - containerPort: 9300
               name: transport
           env:
-            - name: discovery.type
-              value: "single-node"  # ✅ Simplifies cluster setup for dev
-            - name: ES_JAVA_OPTS
-              value: "-Xms512m -Xmx512m"  # ✅ Memory limits for Minikube
+          - name: discovery.type
+            value: "single-node"
+          - name: xpack.security.enabled
+            value: "false"
+          - name: xpack.security.http.ssl.enabled
+            value: "false"
+          - name: xpack.security.transport.ssl.enabled
+            value: "false"
           volumeMounts:
             - name: es-data
               mountPath: /usr/share/elasticsearch/data
