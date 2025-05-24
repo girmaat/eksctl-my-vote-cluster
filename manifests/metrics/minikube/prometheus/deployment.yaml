@@ -22,12 +22,20 @@ spec:
             - "--storage.tsdb.path=/prometheus"
             - "--web.console.libraries=/usr/share/prometheus/console_libraries"
             - "--web.console.templates=/usr/share/prometheus/consoles"
+            - "--rule.files=/etc/prometheus/rules/alerting_rules.yml"
           ports:
             - containerPort: 9090
           volumeMounts:
             - name: config-volume
               mountPath: /etc/prometheus/
+            - name: rules
+              mountPath: /etc/prometheus/rules
+
       volumes:
         - name: config-volume
           configMap:
             name: prometheus-config
+        - name: rules
+          configMap:
+            name: prometheus-alert-rules
+
