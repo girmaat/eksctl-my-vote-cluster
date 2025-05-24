@@ -18,19 +18,19 @@ spec:
           image: fluent/fluent-bit:1.8.12
           volumeMounts:
             - name: varlog
-              mountPath: /var/log
+              mountPath: /var/log                          # System logs
             - name: containers
-              mountPath: /var/log/containers
+              mountPath: /var/log/containers               # K8s logs
             - name: config
-              mountPath: /fluent-bit/etc/
+              mountPath: /fluent-bit/etc/                  # Mount configMap with fluent-bit.conf
             - name: parsers
-              mountPath: /fluent-bit/parsers/   # ✅ Mount entire directory, not subPath
+              mountPath: /fluent-bit/parsers/              # ✅ Mount parser directory
           resources:
             limits:
               memory: 100Mi
               cpu: 100m
           securityContext:
-            privileged: true
+            privileged: true                               # Required for hostPath access
       volumes:
         - name: varlog
           hostPath:
@@ -43,4 +43,4 @@ spec:
             name: fluent-bit-config
         - name: parsers
           configMap:
-            name: fluent-bit-parsers
+            name: fluent-bit-parsers                       # ✅ Reference to shared parser configMap
