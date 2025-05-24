@@ -1,0 +1,35 @@
+{
+    "LoadBalancers": [
+        {
+            "LoadBalancerArn": "arn:aws:elasticloadbalancing:us-east-1:443370713928:loadbalancer/app/k8s-myvotegroup-f1a0fc8e09/afd80491de2d496e",
+            "DNSName": "k8s-myvotegroup-f1a0fc8e09-1892827136.us-east-1.elb.amazonaws.com",
+            "CanonicalHostedZoneId": "Z35SXDOTRQ7X7K",
+            "CreatedTime": "2025-05-24T13:53:20.726000+00:00",
+            "LoadBalancerName": "k8s-myvotegroup-f1a0fc8e09",
+            "Scheme": "internet-facing",
+            "VpcId": "vpc-0c24c50b320222e5b",
+            "State": {
+                "Code": "active"
+            },
+            "Type": "application",
+            "AvailabilityZones": [
+                {
+                    "ZoneName": "us-east-1b",
+                    "SubnetId": "subnet-0557c50827c2e5f59",
+                    "LoadBalancerAddresses": []
+                },
+                {
+                    "ZoneName": "us-east-1a",
+                    "SubnetId": "subnet-074aedf99687b2c55",
+                    "LoadBalancerAddresses": []
+                }
+            ],
+            "SecurityGroups": [
+                "sg-04dfa75c31a401f53",
+                "sg-066cccc969a35792c"
+            ],
+            "IpAddressType": "ipv4",
+            "EnablePrefixForIpv6SourceNat": "off"
+        }
+    ]
+}

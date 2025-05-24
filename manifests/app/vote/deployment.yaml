@@ -20,7 +20,7 @@ spec:
     spec:
       containers:
         - name: vote
-          image: my-vote-vote:latest
+          image: 443370713928.dkr.ecr.us-east-1.amazonaws.com/my-vote-vote:latest
           ports:
             - containerPort: 80
           env:

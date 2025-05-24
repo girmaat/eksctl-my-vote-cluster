@@ -20,16 +20,9 @@ spec:
     spec:
       containers:
         - name: worker
-          image: my-vote-worker:latest
-          readinessProbe:
-            httpGet:
-              path: /health
-              port: 80
-            initialDelaySeconds: 5
-            periodSeconds: 10
+          image: 443370713928.dkr.ecr.us-east-1.amazonaws.com/my-vote-worker:latest
           livenessProbe:
-            httpGet:
-              path: /health
-              port: 80
+            exec:
+              command: [ "sleep", "5" ]
             initialDelaySeconds: 15
-            periodSeconds: 20
+            periodSeconds: 30
