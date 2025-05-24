@@ -52,7 +52,7 @@ This repository manages the infrastructure for the my-vote app:
 6. Configuration
 ========================
 
-    EKS config: clusters/dev/cluster.yaml
+    EKS config: clusters/dev/eksctl-cluster.yaml
 
     Terraform modules: modules/ecr/
 
