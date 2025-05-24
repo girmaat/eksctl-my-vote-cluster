@@ -36,7 +36,7 @@ This repository manages the infrastructure for the my-vote app:
 
     Clone the repo and run:
 
-    eksctl create cluster -f clusters/dev/cluster.yaml
+    eksctl create cluster -f clusters/dev/eksctl-cluster.yaml
     terraform -chdir=envs/dev apply
 
 ========================

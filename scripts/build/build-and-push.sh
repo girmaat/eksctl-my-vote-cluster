@@ -21,8 +21,9 @@ aws ecr get-login-password --region "$AWS_REGION" | \
   docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
 
 # Build the Docker image
-PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-docker build -t "$ECR_REPO:latest" "$PROJECT_ROOT/manifests/$SERVICE_NAME"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
+docker build -t "$ECR_REPO:latest" "$REPO_ROOT/$SERVICE_NAME"
+
 
 # Push the image to ECR
 docker push "$ECR_REPO:latest"
