@@ -1,0 +1,924 @@
+1. fix-aws-time-skew.sh
+
+#!/bin/bash
+set -euo pipefail
+
+BLUE='\033[1;34m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+echo -e "${BLUE}🔧 Restarting chronyd...${NC}"
+sudo systemctl restart chronyd
+
+echo -e "${BLUE}⏱️ Forcing immediate time sync with 'chronyc makestep'...${NC}"
+sudo chronyc makestep
+
+echo -e "${BLUE}🔍 Checking new system time drift...${NC}"
+chronyc tracking
+
+echo -e "${BLUE}🔐 Verifying AWS credentials (sts get-caller-identity)...${NC}"
+if aws sts get-caller-identity > /dev/null 2>&1; then
+  echo -e "${GREEN}[✔] AWS credentials are now valid. Time is synced.${NC}"
+else
+  echo -e "${RED}[✘] AWS authentication still failing. Check your credentials or session.${NC}"
+  exit 1
+fi
+
+
+
+2. validate-cluster.sh
+
+#!/bin/bash
+
+# NOTE: This script is duplicated in:
+# 1. eksctl-my-vote-cluster/scripts/validate-cluster.sh
+# 2. my-vote/scripts/infra/validate-cluster.sh
+# Keep both copies in sync manually.
+# Future improvements to fix this duplication use Git Submodule:
+# In my-vote repo root run :
+# git submodule add https://github.com/your-org/eksctl-my-vote-cluster scripts/infra
+
+# Then you can reference:
+# scripts/infra/scripts/validate-cluster.sh
+# Jenkins can now access the script as part of app repo checkout.
+
+set -euo pipefail
+
+CLUSTER_NAME="my-vote-cluster"
+AWS_REGION="us-east-1"
+NAMESPACE="monitoring"
+SERVICE_ACCOUNT="fluentbit"
+SCRIPT_NAME=$(basename "$0")
+
+PASS_COUNT=0
+FAIL_COUNT=0
+
+# Colors for formatting output
+GREEN='\033[0;32m'
+BLUE='\033[1;34m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+# Utility functions
+print_header() { echo -e "\n${BLUE}=== [$SCRIPT_NAME] $1 ===${NC}"; }
+print_success() { echo -e "${GREEN}[✔] $1${NC}"; ((PASS_COUNT++)); }
+print_fail() { echo -e "${RED}[✘] $1${NC}"; ((FAIL_COUNT++)); }
+
+# 1. Check if the EKS cluster exists
+print_header "1. EKS Cluster Check"
+if eksctl get cluster --region "$AWS_REGION" | grep -q "$CLUSTER_NAME"; then
+  print_success "Cluster $CLUSTER_NAME exists in region $AWS_REGION"
+else
+  print_fail "Cluster $CLUSTER_NAME not found"
+fi
+
+# 2. Ensure all nodes are Ready
+print_header "2. Node Health Check"
+if kubectl get nodes > /dev/null 2>&1; then
+  READY=$(kubectl get nodes --no-headers | grep -c ' Ready')
+  TOTAL=$(kubectl get nodes --no-headers | wc -l)
+  [[ "$READY" -eq "$TOTAL" ]] && print_success "All $READY node(s) are Ready" || print_fail "$READY of $TOTAL node(s) are Ready"
+else
+  print_fail "kubectl get nodes failed"
+fi
+
+# 3. Check if aws-auth ConfigMap is present
+print_header "3. aws-auth ConfigMap Check"
+if kubectl get configmap aws-auth -n kube-system > /dev/null 2>&1; then
+  print_success "aws-auth ConfigMap exists"
+else
+  print_fail "aws-auth ConfigMap missing"
+fi
+
+# 4. Confirm that OIDC issuer is configured
+print_header "4. OIDC Issuer Check"
+OIDC_URL=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" \
+  --query "cluster.identity.oidc.issuer" --output text 2>/dev/null)
+if [[ "$OIDC_URL" == https://* ]]; then
+  print_success "OIDC issuer URL is set: $OIDC_URL"
+else
+  print_fail "OIDC issuer URL missing"
+fi
+
+# 5. Run a pod to test internet connectivity (egress)
+print_header "5. Test Pod Egress to Internet"
+if kubectl run testcurl --image=radial/busyboxplus:curl -i --tty --rm --restart=Never -- curl -s https://www.google.com | grep -q "<html"; then
+  print_success "Pods have internet access"
+else
+  print_fail "Pod cannot access internet (egress failure)"
+fi
+
+# 6. Check if FluentBit service account is IRSA-annotated
+print_header "6. IRSA Annotation Check (Optional)"
+if kubectl get sa "$SERVICE_ACCOUNT" -n "$NAMESPACE" -o jsonpath='{.metadata.annotations.eks\.amazonaws\.com/role-arn}' 2>/dev/null | grep -q 'arn:'; then
+  print_success "IRSA annotation present on $SERVICE_ACCOUNT in $NAMESPACE"
+else
+  print_fail "IRSA annotation missing or not set yet"
+fi
+
+# Final result summary
+print_header "🧪 Validation Summary"
+echo -e "${BLUE}Passed: $PASS_COUNT${NC} | ${RED}Failed: $FAIL_COUNT${NC}"
+[[ "$FAIL_COUNT" -eq 0 ]] && exit 0 || exit 1
+
+
+
+3. destroy-cluster.sh
+
+#!/bin/bash
+set -euo pipefail
+
+CLUSTER_NAME="my-vote-cluster"
+AWS_REGION="us-east-1"
+TAG_KEY="Project"
+TAG_VALUE="my-vote"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+SCRIPT_NAME=$(basename "$0")
+GREEN='\033[0;32m'
+BLUE='\033[1;34m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+print_header()  { echo -e "\n${BLUE}=== [$SCRIPT_NAME] $1 ===${NC}"; }
+print_success() { echo -e "${GREEN}[✔] $1${NC}"; }
+print_fail()    { echo -e "${RED}[✘] $1${NC}"; }
+
+confirm() {
+  echo -e "${RED}⚠️  Are you sure you want to destroy the EKS cluster \"$CLUSTER_NAME\" and all associated resources? (yes/no)${NC}"
+  read -r ans
+  [[ "$ans" == "yes" ]] || { echo -e "${RED}Aborted.${NC}"; exit 1; }
+}
+
+confirm
+
+# 1. Delete PDBs (to avoid eviction blocks)
+print_header "1. Deleting PodDisruptionBudgets in kube-system"
+PDBS=$(kubectl get pdb -n kube-system -o name 2>/dev/null || true)
+if [[ -z "$PDBS" ]]; then
+  print_success "No PDBs found in kube-system"
+else
+  for pdb in $PDBS; do
+    kubectl delete "$pdb" -n kube-system || true
+    echo "Deleted $pdb"
+  done
+  print_success "All kube-system PDBs deleted"
+fi
+
+# 2. Force drain all nodes
+print_header "2. Draining all nodes (forcefully)"
+NODES=$(kubectl get nodes -o name 2>/dev/null || true)
+if [[ -z "$NODES" ]]; then
+  echo "No nodes found or kubeconfig invalid. Skipping drain."
+else
+  for node in $NODES; do
+    echo -e "${BLUE}🔄 Draining $node${NC}"
+    kubectl drain "$node" --ignore-daemonsets --force --delete-emptydir-data --grace-period=0 || true
+  done
+  print_success "Node draining complete"
+fi
+
+# 3. Delete EKS cluster
+print_header "3. Deleting EKS Cluster with eksctl"
+if eksctl delete cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" ; then
+  print_success "EKS cluster $CLUSTER_NAME deleted"
+else
+  print_fail "Cluster deletion failed"
+  exit 1
+fi
+
+# 4. Delete ECR repos
+print_header "4. Deleting ECR Repositories"
+for repo in my-vote-vote my-vote-result my-vote-worker; do
+  if aws ecr describe-repositories --repository-names "$repo" --region "$AWS_REGION" > /dev/null 2>&1; then
+    aws ecr delete-repository --repository-name "$repo" --region "$AWS_REGION" --force
+    print_success "Deleted ECR repo: $repo"
+  else
+    echo "ECR repo $repo not found"
+  fi
+done
+
+# 5. Delete orphaned EBS volumes
+print_header "5. Checking for orphaned EBS volumes"
+VOLUMES=$(aws ec2 describe-volumes \
+  --region "$AWS_REGION" \
+  --filters "Name=tag:$TAG_KEY,Values=$TAG_VALUE" \
+  --query "Volumes[*].VolumeId" --output text)
+
+if [[ -z "$VOLUMES" ]]; then
+  print_success "No orphaned EBS volumes"
+else
+  for vol in $VOLUMES; do
+    aws ec2 delete-volume --volume-id "$vol" --region "$AWS_REGION"
+    echo "Deleted volume $vol"
+  done
+fi
+
+# 6. Release orphaned Elastic IPs
+print_header "6. Releasing orphaned Elastic IPs"
+EIPS=$(aws ec2 describe-addresses \
+  --region "$AWS_REGION" \
+  --filters "Name=tag:$TAG_KEY,Values=$TAG_VALUE" \
+  --query "Addresses[*].AllocationId" --output text)
+
+if [[ -z "$EIPS" ]]; then
+  print_success "No orphaned Elastic IPs"
+else
+  for eip in $EIPS; do
+    aws ec2 release-address --allocation-id "$eip" --region "$AWS_REGION"
+    echo "Released EIP: $eip"
+  done
+fi
+
+# 7. Delete IAM roles
+print_header "7. IAM Role Cleanup"
+ROLES=$(aws iam list-roles \
+  --query "Roles[?contains(RoleName, \`eksctl-$CLUSTER_NAME\`)].RoleName" \
+  --output text)
+
+if [[ -z "$ROLES" ]]; then
+  print_success "No leftover eksctl IAM roles"
+else
+  for role in $ROLES; do
+    policies=$(aws iam list-attached-role-policies --role-name "$role" \
+              --query 'AttachedPolicies[*].PolicyArn' --output text)
+    for policy in $policies; do
+      aws iam detach-role-policy --role-name "$role" --policy-arn "$policy"
+    done
+    aws iam delete-role --role-name "$role"
+    echo "Deleted IAM role: $role"
+  done
+fi
+
+# 8. Delete OIDC provider
+print_header "8. Deleting OIDC Provider (if exists)"
+OIDC_URL=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" \
+  --query "cluster.identity.oidc.issuer" --output text 2>/dev/null || true)
+
+if [[ "$OIDC_URL" == https://* ]]; then
+  OIDC_HOST=$(echo "$OIDC_URL" | cut -d/ -f3)
+  PROVIDER_ARN="arn:aws:iam::$ACCOUNT_ID:oidc-provider/$OIDC_HOST"
+  if aws iam get-open-id-connect-provider --open-id-connect-provider-arn "$PROVIDER_ARN" > /dev/null 2>&1; then
+    aws iam delete-open-id-connect-provider --open-id-connect-provider-arn "$PROVIDER_ARN"
+    print_success "Deleted OIDC provider: $PROVIDER_ARN"
+  else
+    echo "OIDC provider $PROVIDER_ARN not found"
+  fi
+else
+  echo "OIDC URL not found or control plane already deleted"
+fi
+
+print_header "🧹 Cluster Teardown Complete"
+
+
+
+4. validate-destroy.sh
+
+#!/bin/bash
+set -euo pipefail
+#set -x  # Uncomment for step-by-step trace
+
+CLUSTER_NAME="my-vote-cluster"
+AWS_REGION="us-east-1"
+TAG_KEY="Project"
+TAG_VALUE="my-vote"
+
+SCRIPT_NAME=$(basename "$0")
+PASS_COUNT=0
+FAIL_COUNT=0
+
+GREEN='\033[0;32m'
+BLUE='\033[1;34m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+print_header()  { echo -e "\n${BLUE}=== [$SCRIPT_NAME] $1 ===${NC}"; }
+print_success() { echo -e "${GREEN}[✔] $1${NC}"; ((PASS_COUNT++)); }
+print_fail()    { echo -e "${RED}[✘] $1${NC}"; ((FAIL_COUNT++)); }
+
+# 0. Verify AWS credentials
+print_header "0. Verifying AWS credentials"
+if ! aws sts get-caller-identity > /dev/null 2>&1; then
+  print_fail "AWS credentials invalid or expired"
+  exit 1
+else
+  print_success "AWS credentials valid"
+fi
+
+# 0.1 Extract AWS Account ID safely
+print_header "0.1 Extracting AWS Account ID"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
+
+if [[ -z "$ACCOUNT_ID" ]]; then
+  print_fail "Failed to retrieve AWS Account ID (empty or command failed)"
+  exit 1
+else
+  print_success "AWS Account ID is $ACCOUNT_ID"
+  echo "[DEBUG] ACCOUNT_ID=$ACCOUNT_ID"
+fi
+
+# 1. EKS cluster check
+print_header "1. EKS Cluster Deletion Check"
+if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" 2>/dev/null; then
+  print_fail "EKS cluster \"$CLUSTER_NAME\" still exists"
+else
+  print_success "EKS cluster \"$CLUSTER_NAME\" is gone"
+fi
+
+# 2. VPC check
+print_header "2. VPC Check (tagged $TAG_KEY=$TAG_VALUE)"
+VPCS=$(aws ec2 describe-vpcs \
+  --region "$AWS_REGION" \
+  --filters "Name=tag:$TAG_KEY,Values=$TAG_VALUE" \
+  --query "Vpcs[*].VpcId" --output text)
+
+if [[ -z "$VPCS" ]]; then
+  print_success "No tagged VPCs found"
+else
+  print_fail "Remaining VPC(s): $VPCS"
+fi
+
+# 3. EBS volume check
+print_header "3. EBS Volume Check"
+VOLUMES=$(aws ec2 describe-volumes \
+  --region "$AWS_REGION" \
+  --filters "Name=tag:$TAG_KEY,Values=$TAG_VALUE" \
+  --query "Volumes[*].VolumeId" --output text)
+
+if [[ -z "$VOLUMES" ]]; then
+  print_success "No orphaned volumes found"
+else
+  print_fail "Found leftover volumes: $VOLUMES"
+fi
+
+# 4. Elastic IP check
+print_header "4. Elastic IP Check"
+EIPS=$(aws ec2 describe-addresses \
+  --region "$AWS_REGION" \
+  --filters "Name=tag:$TAG_KEY,Values=$TAG_VALUE" \
+  --query "Addresses[*].PublicIp" --output text 2>/dev/null || echo "")
+
+if [[ -z "$EIPS" ]]; then
+  print_success "No orphaned Elastic IPs"
+else
+  print_fail "Found orphaned EIPs: $EIPS"
+fi
+
+# 5. IAM Role check
+print_header "5. IAM Role Cleanup Check"
+ROLES=$(aws iam list-roles \
+  --query "Roles[?contains(RoleName, \`eksctl-$CLUSTER_NAME\`)].RoleName" \
+  --output text)
+
+if [[ -z "$ROLES" ]]; then
+  print_success "No eksctl IAM roles remain"
+else
+  print_fail "Remaining IAM roles: $ROLES"
+fi
+
+# 6. OIDC Provider check
+print_header "6. OIDC Provider Check"
+OIDC_PROVIDERS=$(aws iam list-open-id-connect-providers \
+  --query "OpenIDConnectProviderList[*].Arn" --output text)
+
+OIDC_URL=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" \
+  --query "cluster.identity.oidc.issuer" --output text 2>/dev/null || true)
+
+if [[ "$OIDC_URL" == https://* ]]; then
+  OIDC_HOST=$(echo "$OIDC_URL" | cut -d/ -f3)
+  EXPECTED_OIDC="arn:aws:iam::$ACCOUNT_ID:oidc-provider/$OIDC_HOST"
+  if echo "$OIDC_PROVIDERS" | grep -q "$EXPECTED_OIDC"; then
+    print_fail "OIDC provider still present: $EXPECTED_OIDC"
+  else
+    print_success "OIDC provider is gone"
+  fi
+else
+  print_success "No OIDC URL found (control plane likely deleted)"
+fi
+
+# 7. ECR Repository check
+print_header "7. ECR Repository Check"
+ECR_REPOS=$(aws ecr describe-repositories --region "$AWS_REGION" \
+  --query "repositories[*].repositoryName" --output text)
+
+UNDELETED_REPOS=()
+for repo in my-vote-vote my-vote-result my-vote-worker; do
+  if echo "$ECR_REPOS" | grep -q "$repo"; then
+    UNDELETED_REPOS+=("$repo")
+  fi
+done
+
+if [[ ${#UNDELETED_REPOS[@]} -eq 0 ]]; then
+  print_success "All ECR repos are deleted"
+else
+  print_fail "Remaining ECR repos: ${UNDELETED_REPOS[*]}"
+fi
+
+# ✅ Final Summary
+print_header "🔍 Validation Summary"
+echo -e "${BLUE}Passed: $PASS_COUNT${NC} | ${RED}Failed: $FAIL_COUNT${NC}"
+[[ "$FAIL_COUNT" -eq 0 ]] && exit 0 || exit 1
+
+
+
+5. patch-aws-auth.sh
+
+#!/bin/bash
+set -euo pipefail
+
+CLUSTER_NAME="my-vote-cluster"
+AWS_REGION="us-east-1"
+SCRIPT_NAME=$(basename "$0")
+
+BLUE='\033[1;34m'
+GREEN='\033[0;32m'
+RED='\033[0;31m'
+NC='\033[0m'
+
+log()    { echo -e "${BLUE}🔷 [$SCRIPT_NAME] $*${NC}"; }
+ok()     { echo -e "${GREEN}✅ $*${NC}"; }
+error()  { echo -e "${RED}❌ $*${NC}"; }
+
+# Step 1: Get private DNS name of first node
+log "Getting first node's internal DNS name..."
+NODE_DNS=$(kubectl get nodes -o jsonpath='{.items[0].metadata.name}')
+
+if [[ -z "$NODE_DNS" ]]; then
+  error "No nodes found in the cluster"
+  exit 1
+fi
+
+log "Node DNS: $NODE_DNS"
+
+# Step 2: Lookup EC2 instance by private DNS
+log "Finding EC2 instance for $NODE_DNS..."
+INSTANCE_PROFILE_ARN=$(aws ec2 describe-instances \
+  --region "$AWS_REGION" \
+  --filters "Name=private-dns-name,Values=$NODE_DNS" \
+  --query "Reservations[].Instances[].IamInstanceProfile.Arn" \
+  --output text)
+
+if [[ -z "$INSTANCE_PROFILE_ARN" ]]; then
+  error "Failed to find instance profile for $NODE_DNS"
+  exit 1
+fi
+
+INSTANCE_PROFILE_NAME=$(basename "$INSTANCE_PROFILE_ARN")
+log "Instance profile: $INSTANCE_PROFILE_NAME"
+
+# Step 3: Extract role ARN from instance profile
+ROLE_ARN=$(aws iam get-instance-profile \
+  --instance-profile-name "$INSTANCE_PROFILE_NAME" \
+  --query "InstanceProfile.Roles[0].Arn" \
+  --output text)
+
+if [[ -z "$ROLE_ARN" ]]; then
+  error "Failed to extract IAM role ARN from profile"
+  exit 1
+fi
+
+log "IAM Role ARN: $ROLE_ARN"
+
+# Step 4: Generate and apply aws-auth ConfigMap
+log "Patching aws-auth ConfigMap..."
+
+TMP_FILE=$(mktemp)
+cat <<EOF > "$TMP_FILE"
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-auth
+  namespace: kube-system
+data:
+  mapRoles: |
+    - rolearn: $ROLE_ARN
+      username: system:node:{{EC2PrivateDNSName}}
+      groups:
+        - system:bootstrappers
+        - system:nodes
+EOF
+
+kubectl apply -f "$TMP_FILE"
+rm -f "$TMP_FILE"
+ok "aws-auth ConfigMap patched successfully!"
+
+
+
+6. build-and-push.sh
+
+#!/bin/bash
+
+# Usage: ./build-and-push.sh <service_name>
+# Example: ./build-and-push.sh vote
+
+set -e
+
+SERVICE_NAME=$1
+
+if [ -z "$SERVICE_NAME" ]; then
+  echo "Usage: $0 <service_name>"
+  exit 1
+fi
+
+AWS_REGION="us-east-1"
+AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+ECR_REPO="$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/my-vote-$SERVICE_NAME"
+
+# Authenticate Docker to AWS ECR
+aws ecr get-login-password --region "$AWS_REGION" | \
+  docker login --username AWS --password-stdin "$AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com"
+
+# Build the Docker image
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+docker build -t "$ECR_REPO:latest" "$PROJECT_ROOT/manifests/$SERVICE_NAME"
+
+# Push the image to ECR
+docker push "$ECR_REPO:latest"
+
+
+
+7. audit-eks-resources.sh
+
+#!/bin/bash
+set -euo pipefail
+
+CLUSTER_NAME="my-vote-cluster"
+AWS_REGION="us-east-1"
+PROJECT_TAG_KEY="Project"
+PROJECT_TAG_VALUE="my-vote"
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+
+ask_to_continue() {
+  echo -n "👉 Do you want to delete this manually now? (yes/no/skip all): "
+  read -r choice
+  case "$choice" in
+    yes) return 0 ;;
+    no)  return 1 ;;
+    skip*) echo "⚠️  Skipping all further deletions."; exit 0 ;;
+    *)    echo "Invalid input. Exiting."; exit 1 ;;
+  esac
+}
+
+print_header() {
+  echo -e "\n\033[1;34m=== Checking: $1 ===\033[0m"
+}
+
+# 1. EKS Cluster
+print_header "EKS Cluster"
+if aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" >/dev/null 2>&1; then
+  echo "❌ Cluster $CLUSTER_NAME still exists."
+else
+  echo "✅ Cluster $CLUSTER_NAME is gone."
+fi
+
+# 2. VPCs tagged to project
+print_header "VPCs tagged $PROJECT_TAG_KEY=$PROJECT_TAG_VALUE"
+VPCS=$(aws ec2 describe-vpcs \
+  --region "$AWS_REGION" \
+  --filters "Name=tag:$PROJECT_TAG_KEY,Values=$PROJECT_TAG_VALUE" \
+  --query "Vpcs[*].VpcId" --output text)
+
+if [[ -z "$VPCS" ]]; then
+  echo "✅ No tagged VPCs found."
+else
+  echo "❌ Found VPCs: $VPCS"
+  ask_to_continue
+fi
+
+# 3. EBS Volumes
+print_header "EBS Volumes tagged $PROJECT_TAG_KEY=$PROJECT_TAG_VALUE"
+VOLUMES=$(aws ec2 describe-volumes \
+  --region "$AWS_REGION" \
+  --filters "Name=tag:$PROJECT_TAG_KEY,Values=$PROJECT_TAG_VALUE" \
+  --query "Volumes[*].VolumeId" --output text)
+
+if [[ -z "$VOLUMES" ]]; then
+  echo "✅ No orphaned volumes found."
+else
+  echo "❌ Orphaned volumes: $VOLUMES"
+  ask_to_continue
+fi
+
+# 4. Elastic IPs
+print_header "Elastic IPs tagged $PROJECT_TAG_KEY=$PROJECT_TAG_VALUE"
+EIPS=$(aws ec2 describe-addresses \
+  --region "$AWS_REGION" \
+  --filters "Name=tag:$PROJECT_TAG_KEY,Values=$PROJECT_TAG_VALUE" \
+  --query "Addresses[*].AllocationId" --output text)
+
+if [[ -z "$EIPS" ]]; then
+  echo "✅ No orphaned Elastic IPs."
+else
+  echo "❌ Found orphaned EIPs: $EIPS"
+  ask_to_continue
+fi
+
+# 5. IAM Roles
+print_header "IAM Roles from eksctl for $CLUSTER_NAME"
+ROLES=$(aws iam list-roles \
+  --query "Roles[?contains(RoleName, \`eksctl-$CLUSTER_NAME\`)].RoleName" \
+  --output text)
+
+if [[ -z "$ROLES" ]]; then
+  echo "✅ No eksctl IAM roles remain."
+else
+  echo "❌ Found roles: $ROLES"
+  ask_to_continue
+fi
+
+# 6. OIDC Provider
+print_header "OIDC Provider for $CLUSTER_NAME"
+OIDC_HOST=$(aws eks describe-cluster --name "$CLUSTER_NAME" --region "$AWS_REGION" \
+  --query "cluster.identity.oidc.issuer" --output text 2>/dev/null | cut -d/ -f3 || true)
+
+if [[ -n "$OIDC_HOST" ]]; then
+  OIDC_ARN="arn:aws:iam::$ACCOUNT_ID:oidc-provider/$OIDC_HOST"
+  echo "❌ OIDC provider still exists: $OIDC_ARN"
+  ask_to_continue
+else
+  echo "✅ No OIDC provider found."
+fi
+
+# 7. ECR Repositories
+print_header "ECR Repositories (vote, result, worker)"
+for repo in my-vote-vote my-vote-result my-vote-worker; do
+  if aws ecr describe-repositories --repository-names "$repo" --region "$AWS_REGION" > /dev/null 2>&1; then
+    echo "❌ ECR repository exists: $repo"
+    ask_to_continue
+  else
+    echo "✅ ECR repo $repo is deleted."
+  fi
+done
+
+# 8. eksctl CloudFormation Stacks
+print_header "eksctl CloudFormation Stacks"
+STACKS=$(aws cloudformation describe-stacks --region "$AWS_REGION" \
+  --query "Stacks[?starts_with(StackName, 'eksctl-$CLUSTER_NAME')].StackName" --output text)
+
+if [[ -z "$STACKS" ]]; then
+  echo "✅ No eksctl-related stacks found."
+else
+  echo "❌ Found CloudFormation stacks: $STACKS"
+  ask_to_continue
+fi
+
+echo -e "\n\033[0;32m🎉 Manual audit complete.\033[0m"
+
+
+
+8. validate-EFK-Stack.sh
+
+#!/bin/bash
+
+set -e
+
+NAMESPACE_LOGGING="logging"
+NAMESPACE_SYSTEM="kube-system"
+
+echo "🔍 Validating EFK stack..."
+
+# Check Elasticsearch pod(s)
+echo "➡️  Checking Elasticsearch pod(s)..."
+kubectl get pods -n $NAMESPACE_LOGGING -l app=elasticsearch
+
+# Check Kibana pod
+echo "➡️  Checking Kibana pod..."
+kubectl get pods -n $NAMESPACE_LOGGING -l app=kibana
+
+# Check Fluent Bit DaemonSet pods
+echo "➡️  Checking Fluent Bit pods..."
+kubectl get daemonset fluent-bit -n $NAMESPACE_SYSTEM -o jsonpath='{.status.numberReady} ready / {.status.desiredNumberScheduled} scheduled' && echo
+
+# Show service endpoints
+echo "🌐 Services:"
+kubectl get svc -n $NAMESPACE_LOGGING
+
+# Optional: port-forward Kibana
+echo -e "\n💡 To access Kibana UI:"
+echo "minikube service kibana -n $NAMESPACE_LOGGING --url"
+
+echo -e "\n✅ Validation complete. If all pods are Running, your EFK stack is good to go!"
+
+
+
+9. apply-all-manifests.sh
+
+#!/bin/bash
+
+set -e
+
+echo "==================================================================="
+echo "🧩 STEP 1: Selectively apply environment-specific folders (e.g., EKS)"
+echo "==================================================================="
+
+# Prompt before applying EKS metrics
+if [ -d "manifests/metrics/eks" ]; then
+  read -p "❓ Do you want to apply EKS-specific metrics configs (manifests/metrics/eks)? [y/N]: " confirm_eks
+  if [[ "$confirm_eks" =~ ^[Yy]$ ]]; then
+    echo "✅ Applying EKS metrics manifests..."
+    kubectl apply -f manifests/metrics/eks/ --recursive
+  else
+    echo "⏭️  Skipping EKS metrics manifests."
+  fi
+fi
+
+echo ""
+echo "==================================================================="
+echo "🔧 STEP 2: Ensure required Kubernetes namespaces exist"
+echo "==================================================================="
+
+kubectl get namespace logging >/dev/null 2>&1 || { echo "📁 Creating namespace: logging"; kubectl create namespace logging; }
+kubectl get namespace kube-system >/dev/null 2>&1 || echo "ℹ️ Namespace 'kube-system' is built-in and already exists."
+
+echo ""
+echo "==================================================================="
+echo "📦 STEP 3: Applying all manifests under ./manifests recursively"
+echo "==================================================================="
+
+kubectl apply -f manifests/ --recursive
+
+echo ""
+echo "==================================================================="
+echo "🔄 STEP 4: Restarting critical Deployments to pick up new image versions"
+echo "==================================================================="
+
+declare -a DEPLOYMENTS=("vote" "result" "worker" "kibana")
+
+for deploy in "${DEPLOYMENTS[@]}"; do
+  echo "🔁 Attempting to restart deployment '$deploy'..."
+  kubectl rollout restart deployment "$deploy" 2>/dev/null || echo "⚠️  Deployment '$deploy' not found or not in current namespace — skipping."
+done
+
+echo ""
+echo "=================================================================="
+echo "📊 STEP 5: Status Summary — Log Stack Components"
+echo "=================================================================="
+
+echo "📥 Elasticsearch Pods (namespace: logging):"
+kubectl get pods -n logging -l app=elasticsearch
+
+echo ""
+echo "📊 Kibana Pod (namespace: logging):"
+kubectl get pods -n logging -l app=kibana
+
+echo ""
+echo "📤 Fluent Bit Pods (namespace: kube-system):"
+kubectl get pods -n kube-system -l name=fluent-bit
+
+echo ""
+echo "🌐 Services in 'logging' namespace:"
+kubectl get svc -n logging
+
+echo ""
+echo "🎉 All done! Your full EFK stack (and optional metrics) has been applied successfully."
+echo "💡 Use 'kubectl logs' or Kibana UI to inspect logs. Run validate-efk.sh to verify health."
+
+
+
+10. destroy-all-manifests.sh
+
+#!/bin/bash
+
+set -e
+
+echo "==================================================================="
+echo "⚠️  WARNING: This will DELETE all Kubernetes resources in ./manifests/"
+echo "==================================================================="
+read -p "❓ Are you sure you want to proceed? This action cannot be undone. [y/N]: " confirm
+
+if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+  echo "❌ Cancelled. No resources were deleted."
+  exit 1
+fi
+
+echo ""
+echo "==================================================================="
+echo "🧨 STEP 1: Delete all manifest-based resources recursively"
+echo "==================================================================="
+
+kubectl delete -f manifests/ --recursive || echo "⚠️ Some resources may not have been found (already deleted)."
+
+echo ""
+echo "==================================================================="
+echo "🧼 STEP 2: Optionally delete the custom 'logging' namespace"
+echo "==================================================================="
+read -p "❓ Do you want to delete the entire 'logging' namespace (Elasticsearch, Kibana, etc)? [y/N]: " delete_ns
+
+if [[ "$delete_ns" =~ ^[Yy]$ ]]; then
+  echo "🗑️ Deleting namespace: logging"
+  kubectl delete namespace logging || echo "⚠️ Namespace 'logging' was already deleted or not found."
+else
+  echo "⏭️  Skipping namespace deletion."
+fi
+
+echo ""
+echo "==================================================================="
+echo "✅ Clean-up Summary"
+echo "==================================================================="
+
+echo "🚫 Resources defined in ./manifests/ have been deleted."
+echo "🧹 Remaining namespaces:"
+kubectl get namespaces
+
+echo ""
+echo "🎉 Destruction process completed. You're now back to a clean cluster state."
+
+
+
+11. open-kibana-from-host.sh
+
+#!/bin/bash
+
+# === Configuration ===
+KIBANA_PORT=30561
+KIBANA_IP="192.168.49.2"  # Replace this with the IP from `minikube ip` if dynamic
+
+URL="http://${KIBANA_IP}:${KIBANA_PORT}"
+
+echo "🌐 Attempting to open Kibana at: $URL"
+
+# Open in Windows default browser
+if command -v xdg-open &> /dev/null; then
+  xdg-open "$URL"
+elif command -v powershell.exe &> /dev/null; then
+  powershell.exe start "$URL"
+elif command -v explorer.exe &> /dev/null; then
+  explorer.exe "$URL"
+elif command -v open &> /dev/null; then
+  open "$URL"
+else
+  echo "🔗 Please open manually: $URL"
+fi
+
+
+
+12. healthcheck-kibana.sh
+
+#!/bin/bash
+
+KIBANA_IP=$(minikube ip)
+KIBANA_PORT=30561
+KIBANA_URL="http://${KIBANA_IP}:${KIBANA_PORT}"
+
+echo "🔍 Testing Kibana at: $KIBANA_URL"
+
+# Check basic connectivity
+echo "➡️  Attempting HTTP connection..."
+curl -s --connect-timeout 2 "$KIBANA_URL" >/dev/null || {
+  echo "❌ Failed to connect to Kibana at $KIBANA_URL"
+  exit 1
+}
+
+# Check status endpoint
+echo "➡️  Checking /api/status..."
+STATUS=$(curl -s "$KIBANA_URL/api/status" | jq -r '.status.overall.state')
+
+if [[ "$STATUS" == "green" ]]; then
+  echo "✅ Kibana is healthy (status: $STATUS)"
+elif [[ "$STATUS" == "yellow" ]]; then
+  echo "⚠️  Kibana is up but not fully healthy (status: $STATUS)"
+else
+  echo "❌ Kibana returned unhealthy status is : $STATUS"
+fi
+
+
+
+13. diagnose-fluentbit.sh
+
+#!/bin/bash
+set -e
+
+echo "🔍 Fluent Bit Diagnostics (minikube)"
+
+echo -e "\n1️⃣ Checking if fluent-bit DaemonSet is running..."
+kubectl get daemonset fluent-bit -n kube-system
+
+echo -e "\n2️⃣ Checking recent fluent-bit logs..."
+LOG_OUTPUT=$(kubectl logs -n kube-system -l name=fluent-bit --tail=30 2>&1)
+
+if echo "$LOG_OUTPUT" | grep -q "parser 'cri' is not registered"; then
+  echo "❌ Parser 'cri' is not registered. Likely parser config not loaded."
+else
+  echo "✅ No parser errors detected."
+fi
+
+if echo "$LOG_OUTPUT" | grep -q "Could not open parser configuration file"; then
+  echo "❌ Fluent Bit failed to open parser file. Check mountPath + subPath!"
+else
+  echo "✅ Parser file loaded (no 'could not open' error)."
+fi
+
+echo -e "\n3️⃣ Checking if fluent-bit-parsers ConfigMap exists..."
+kubectl get configmap fluent-bit-parsers -n kube-system
+
+echo -e "\n4️⃣ Verifying Fluent Bit sees logs (tail input)..."
+kubectl logs -n kube-system -l name=fluent-bit --tail=30 | grep -E "(tail|log|flush|es)"
+
+echo -e "\n🧪 If no errors above, generate logs (e.g. via vote) and check Elasticsearch:"
+echo "   kubectl exec deploy/vote -- curl localhost"
+echo "   kubectl run es-query --rm -it -n logging --image=curlimages/curl --restart=Never -- \\"
+echo "     curl -s http://elasticsearch.logging.svc:9200/_cat/indices?v"
+
+
+
