@@ -24,7 +24,8 @@ spec:
             - name: config
               mountPath: /fluent-bit/etc/                  # Mount configMap with fluent-bit.conf
             - name: parsers
-              mountPath: /fluent-bit/parsers/              # ✅ Mount parser directory
+              mountPath: /fluent-bit/etc/parsers.conf      # ✅ Mount parser directory
+              subPath: parsers.conf
           resources:
             limits:
               memory: 100Mi
