@@ -9,7 +9,7 @@ data:
         Flush        1
         Daemon       Off
         Log_Level    info
-        Parsers_File parsers.conf  # ✅ Updated to reflect new mount path
+        Parsers_File parsers.conf  # ✅ Correct relative path due to subPath mount
 
     [INPUT]
         Name              tail
