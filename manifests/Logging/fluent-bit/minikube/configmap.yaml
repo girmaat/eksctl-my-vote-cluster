@@ -9,7 +9,7 @@ data:
         Flush        1
         Daemon       Off
         Log_Level    info
-        Parsers_File parsers.conf  # ✅ Correct relative path due to subPath mount
+        Parsers_File /fluent-bit/parsers/parsers.conf      # ✅ Updated to full path inside mounted folder
 
     [INPUT]
         Name              tail
